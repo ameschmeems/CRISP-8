@@ -1,3 +1,5 @@
+use rand::random;
+
 pub const SCREEN_WIDTH: usize = 64;
 pub const SCREEN_HEIGHT: usize = 32;
 
@@ -8,6 +10,7 @@ const NUM_KEYS: usize = 16;
 
 // originally the chip-8 interpreter was located in ram 0x000 - 0x1ff, and expected programs to load right after
 const START_ADDR: u16 = 0x200;
+const FONT_ADDR: u16 = 0x050;
 
 const FONTSET_SIZE: usize = 80;
 
@@ -70,7 +73,7 @@ impl Emu
 		};
 
 		// the fonts can be stored anywhere before 0x200, but putting it between 0x050 and 0x09f has become a popular convention in emulators
-		new_emu.ram[0x050..0x0a0].copy_from_slice(&FONTSET);
+		new_emu.ram[(FONT_ADDR as usize)..((FONT_ADDR as usize) + FONTSET_SIZE)].copy_from_slice(&FONTSET);
 
 		new_emu
 	}
@@ -87,7 +90,7 @@ impl Emu
 		self.stack = [0; STACK_SIZE];
 		self.dt = 0;
 		self.st = 0;
-		self.ram[0x050..0x0a0].copy_from_slice(&FONTSET);
+		self.ram[(FONT_ADDR as usize)..((FONT_ADDR as usize) + FONTSET_SIZE)].copy_from_slice(&FONTSET);
 	}
 
 	fn push(&mut self, val: u16)
@@ -124,6 +127,7 @@ impl Emu
 			if self.st == 0
 			{
 				// sound here
+				println!("Boop!");
 			}
 		}
 	}
@@ -213,17 +217,199 @@ impl Emu
 			(0x7, _, _, _) => {
 				let x = digit2;
 				let nn = (op & 0x00ff) as u8;
-				self.v_reg[x as usize] += nn;
+				self.v_reg[x as usize] = self.v_reg[x as usize].wrapping_add(nn);
+			},
+			// opcode 8XY0: VX = VY
+			(0x8, _, _, 0x0) => {
+				let x = digit2;
+				let y = digit3;
+				self.v_reg[x as usize] = self.v_reg[y as usize];
+			},
+			// opcode 8XY1: VX |= VY
+			(0x8, _, _, 0x1) => {
+				let x = digit2;
+				let y = digit3;
+				self.v_reg[x as usize] |= self.v_reg[y as usize];
+			},
+			// opcode 8XY2: VX &= VY
+			(0x8, _, _, 0x2) => {
+				let x = digit2;
+				let y = digit3;
+				self.v_reg[x as usize] &= self.v_reg[y as usize];
+			},
+			// opcode 8XY3: VX ^= VY
+			(0x8, _, _, 0x3) => {
+				let x = digit2;
+				let y = digit3;
+				self.v_reg[x as usize] ^= self.v_reg[y as usize];
+			},
+			// opcode 8XY4: VX += VY
+			// note - unlike 7XNN this does set the carry flag in case of overflow
+			(0x8, _, _, 0x4) => {
+				let x = digit2;
+				let y = digit3;
+				
+				let (new_vx, carry) = self.v_reg[x as usize].overflowing_add(self.v_reg[y as usize]);
+				let new_vf = if carry { 1 } else { 0 };
+				self.v_reg[x as usize] = new_vx;
+				self.v_reg[0xf] = new_vf;
+			},
+			// opcode 8XY5: VX -= VY, sets carry flag to 0 if it underflows, or otherwise to 1
+			(0x8, _, _, 0x5) => {
+				let x = digit2;
+				let y = digit3;
+				
+				let (new_vx, borrow) = self.v_reg[x as usize].overflowing_sub(self.v_reg[y as usize]);
+				let new_vf = if borrow { 0 } else { 1 };
+				self.v_reg[x as usize] = new_vx;
+				self.v_reg[0xf] = new_vf;
+			},
+			// opcode 8XY7: VX = VY - VX, sets carry flag same as 8XY5
+			(0x8, _, _, 0x7) => {
+				let x = digit2;
+				let y = digit3;
+
+				let (new_vx, borrow) = self.v_reg[y as usize].overflowing_sub(self.v_reg[x as usize]);
+				let new_vf = if borrow { 0 } else { 1 };
+				self.v_reg[x as usize] = new_vx;
+				self.v_reg[0xf] = new_vf;
+			},
+			// opcode 8XY6: VX >>= 1, sets flag to the lost bit
+			// note - older implementations first set VX to VY, but newer implementations ignore the Y value completely
+			(0x8, _, _, 0x6) => {
+				let x = digit2;
+				let lost_bit = self.v_reg[x as usize] & 1;
+				self.v_reg[x as usize] >>= 1;
+				self.v_reg[0xf] = lost_bit;
+			},
+			// opcode 8XYE: VX <<= 1. sets flag to the lost bit
+			// note - same as 8XY6
+			(0x8, _, _, 0xe) => {
+				let x = digit2;
+				let lost_bit = (self.v_reg[x as usize] >> 7) & 1;
+				self.v_reg[x as usize] <<= 1;
+				self.v_reg[0xf] = lost_bit;
 			},
 			// opcode ANNN: I = NNN
 			(0xa, _, _, _) => {
 				let nnn = op & 0x0fff;
 				self.i_reg = nnn;
-			}
+			},
+			// opcode BNNN: JMP NNN + V0
+			// note - some newer implementations (likely unintentionally) treat the second digit as X, resulting in JMP XNN + VX
+			// this is not a common operation, so sticking with the older version should be fine
+			(0xb, _, _, _) => {
+				let nnn = op & 0x0fff;
+				self.pc = self.v_reg[0x0] as u16 + nnn;
+			},
+			// opcode CXNN: rand() & NN
+			(0xc, _, _, _) => {
+				let x = digit2;
+				let nn = (op & 0x00ff) as u8;
+				let random_num: u8 = random();
+				self.v_reg[x as usize] = random_num & nn;
+			},
 			// opcode DXYN: DRAW
 			(0xd, _, _, _) => {
 				self.draw(digit2, digit3, digit4);
 			},
+			// opcode EX9E: SKIP if key specified in VX is currently pressed
+			(0xe, _, 0x9, 0xe) => {
+				let x = digit2;
+				let vx = self.v_reg[x as usize];
+				if self.keys[vx as usize]
+				{
+					self.pc += 2;
+				}
+			},
+			// opcode EXA1: SKIP if key specified in VX is not currently pressed
+			(0xe, _, 0xa, 0x1) => {
+				let x = digit2;
+				let vx = self.v_reg[x as usize];
+				if !self.keys[vx as usize]
+				{
+					self.pc += 2;
+				}
+			},
+			// opcode FX07: set VX to current value of delay timer
+			(0xf, _, 0x0, 0x7) => {
+				let x = digit2;
+				self.v_reg[x as usize] = self.dt;
+			},
+			// opcode FX15: set delay timer to VX
+			(0xf, _, 0x1, 0x5) => {
+				let x = digit2;
+				self.dt = self.v_reg[x as usize];
+			},
+			// opcode FX18: set sound timer to VX
+			(0xf, _, 0x1, 0x8) => {
+				let x = digit2;
+				self.st = self.v_reg[x as usize];
+			},
+			// opcode FX1E: I += VX, sets flag to 1 if I "overflows" from 0x0fff to 0x1000
+			// note - not all implementations set the flag, but there's no harm in doing it (and some games might rely on it)
+			(0xf, _, 0x1, 0xe) => {
+				let x = digit2;
+				self.i_reg += self.v_reg[x as usize] as u16;
+				let new_vf = if self.i_reg >= 0x1000 { 1 } else { 0 };
+				self.v_reg[0xf] = new_vf;
+			},
+			// opcode FX0A: Blocks continuation of program until a key press is detected, then stores it into VX
+			// note - in case of multiple pressed keys, take the lowest indexed one
+			(0xf, _, 0x0, 0xa) => {
+				let x = digit2 as usize;
+				let mut pressed = false;
+				for i in 0..self.keys.len()
+				{
+					if self.keys[i]
+					{
+						self.v_reg[x as usize] = i as u8;
+						pressed = true;
+						break ;
+					}
+				}
+				if !pressed
+				{
+					// reset instruction
+					self.pc -= 2;
+				}
+			},
+			// opcode FX29: set I to the font address of character in VX
+			// note - if VX is bigger than 0x0f, only take the last digit
+			(0xf, _, 0x2, 0x9) => {
+				let x = digit2;
+				let c = self.v_reg[x as usize] as u16;
+				let c = c & 0x0f;
+				self.i_reg = FONT_ADDR + c * 5;
+			},
+			// opcode FX33: puts 3 decimal digits of the number in VX at I, I + 1 and I + 2 respectively
+			(0xf, _, 0x3, 0x3) => {
+				let x = digit2;
+				let vx = self.v_reg[x as usize];
+				let digit1 = vx / 100;
+				let digit2 = (vx - digit1 * 100) / 10;
+				let digit3 = vx % 10;
+				self.ram[self.i_reg as usize] = digit1;
+				self.ram[(self.i_reg + 1) as usize] = digit2;
+				self.ram[(self.i_reg + 2) as usize] = digit3;
+			},
+			// opcode FX55: store registers V0 - VX to memory, in incremental addresses starting from I
+			// note - originally I was modified in the process, but modern implementations leave it intact
+			(0xf, _, 0x5, 0x5) => {
+				let x = digit2;
+				for i in 0..(x + 1) as u32
+				{
+					self.ram[(self.i_reg as u32 + i) as usize] = self.v_reg[i as usize];
+				}
+			},
+			// opcode FX65: load values stored at I - I + X, and store them in registers V0 - VX
+			(0xf, _, 0x6, 0x5) => {
+				let x = digit2;
+				for i in 0..(x + 1) as u32
+				{
+					self.v_reg[i as usize] = self.ram[(self.i_reg as u32 + i) as usize];
+				}
+			}
 			(_, _, _, _) => unimplemented!("Unimplemented opcode: {}", op),
 		}
 	}
@@ -280,5 +466,10 @@ impl Emu
 		let start = START_ADDR as usize;
 		let end = START_ADDR as usize + data.len();
 		self.ram[start..end].copy_from_slice(data);
+	}
+
+	pub fn keypress(&mut self, key: usize, down: bool)
+	{
+		self.keys[key] = down;
 	}
 }
