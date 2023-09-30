@@ -1,0 +1,10 @@
+^C:\DEV\CRISP-8\DESKTOP\TARGET\DEBUG\BUILD\SDL2-SYS-ECD5F79FA50B6DB8\OUT\BUILD\CMAKEFILES\8B2C8AE72D8502B2F7287A872495DB2D\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/pucyl/.cargo/registry/src/index.crates.io-6f17d22bba15001f/sdl2-sys-0.35.2/SDL -BC:/dev/crisp-8/desktop/target/debug/build/sdl2-sys-ecd5f79fa50b6db8/out/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/dev/crisp-8/desktop/target/debug/build/sdl2-sys-ecd5f79fa50b6db8/out/build/SDL2.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
