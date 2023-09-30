@@ -38,6 +38,7 @@ pub struct Emu
 	screen: [bool; SCREEN_WIDTH * SCREEN_HEIGHT],
 	keys: [bool; NUM_KEYS],
 	// registers, numbered V0 to VF
+	// VF is used as a flag register
 	v_reg: [u8; NUM_REGS],
 	// 16 bit register, used for indexing into ram
 	i_reg: u16,
@@ -68,8 +69,8 @@ impl Emu
 			st: 0
 		};
 
-		// the fonts can be stored anywhere before 0x200, but putting it between 0x050 and 0x1ff has become a popular convention in emulators
-		new_emu.ram[0x050..0x1ff].copy_from_slice(&FONTSET);
+		// the fonts can be stored anywhere before 0x200, but putting it between 0x050 and 0x09f has become a popular convention in emulators
+		new_emu.ram[0x050..0x0a0].copy_from_slice(&FONTSET);
 
 		new_emu
 	}
@@ -86,7 +87,7 @@ impl Emu
 		self.stack = [0; STACK_SIZE];
 		self.dt = 0;
 		self.st = 0;
-		self.ram[0x050..0x1ff].copy_from_slice(&FONTSET);
+		self.ram[0x050..0x0a0].copy_from_slice(&FONTSET);
 	}
 
 	fn push(&mut self, val: u16)
@@ -145,7 +146,139 @@ impl Emu
 
 		match (digit1, digit2, digit3, digit4)
 		{
+			// opcode 0000: NOP
+			(0x0, 0x0, 0x0, 0x0) => return,
+			// opcode 00e0: CLS
+			(0x0, 0x0, 0xe, 0x0) => { self.screen = [false; SCREEN_WIDTH * SCREEN_HEIGHT]; },
+			// opcode 1NNN: JMP NNN
+			(0x1, _, _, _) => {
+				let nnn = op & 0x0fff;
+				self.pc = nnn;
+			},
+			// opcode 2NNN: CALL NNN
+			(0x2, _, _, _) => {
+				self.push(self.pc);
+				let nnn = op & 0x0fff;
+				self.pc = nnn;
+			},
+			// opcode 00ee: RET
+			(0x0, 0x0, 0xe, 0xe) => {
+				let ret_addr = self.pop();
+				self.pc = ret_addr;
+			},
+			// opcode 3XNN: SKIP VX == NN
+			(0x3, _, _, _) => {
+				let x = digit2;
+				let nn = (op & 0x00ff) as u8;
+				if self.v_reg[x as usize] == nn
+				{
+					self.pc += 2;
+				}
+			},
+			// opcode 4XNN: SKIP VX != NN
+			(0x4, _, _, _) => {
+				let x = digit2;
+				let nn = (op & 0x00ff) as u8;
+				if self.v_reg[x as usize] != nn
+				{
+					self.pc += 2;
+				}
+			},
+			// opcode 5XY0: SKIP VX == VY
+			(0x5, _, _, 0x0) => {
+				let x = digit2;
+				let y = digit3;
+				if self.v_reg[x as usize] == self.v_reg[y as usize]
+				{
+					self.pc += 2;
+				}
+			},
+			// opcode 9XY0: SKIP VX != VY
+			(0x9, _, _, 0x0) => {
+				let x = digit2;
+				let y = digit3;
+				if self.v_reg[x as usize] != self.v_reg[y as usize]
+				{
+					self.pc += 2;
+				}
+			},
+			// opcode 6XNN: VX = NN
+			(0x6, _, _, _) => {
+				let x = digit2;
+				let nn = (op & 0x00ff) as u8;
+				self.v_reg[x as usize] = nn;
+			},
+			// opcode 7XNN: VX += NN
+			// note - this doesnt set the carry flag if overflow happens
+			(0x7, _, _, _) => {
+				let x = digit2;
+				let nn = (op & 0x00ff) as u8;
+				self.v_reg[x as usize] += nn;
+			},
+			// opcode ANNN: I = NNN
+			(0xa, _, _, _) => {
+				let nnn = op & 0x0fff;
+				self.i_reg = nnn;
+			}
+			// opcode DXYN: DRAW
+			(0xd, _, _, _) => {
+				self.draw(digit2, digit3, digit4);
+			},
 			(_, _, _, _) => unimplemented!("Unimplemented opcode: {}", op),
 		}
+	}
+
+	fn draw(&mut self, x: u16, y: u16, n: u16)
+	{
+		// the original x and y coordinates wrap around, however if the sprite goes off screen, it should be clipped instead of wrapped
+		let x_coord = self.v_reg[x as usize] as usize % SCREEN_WIDTH;
+		let y_coord = self.v_reg[y as usize] as usize % SCREEN_HEIGHT;
+		self.v_reg[0xf as usize] = 0;
+		// if any pixels are flipped off, we need to write to the flag register
+		let mut flip = false;
+		for row in 0..n
+		{
+			// sprite is stored at addr specified by the I register
+			let row_addr = self.i_reg + row;
+			let pixels = self.ram[row_addr as usize];
+			for col in 0..8
+			{
+				if y_coord + row as usize >= SCREEN_HEIGHT
+				{
+					break ;
+				}
+				if (pixels & (0b1000_0000 >> col)) != 0
+				{
+					
+					let x = x_coord + col as usize;
+					let y = y_coord + row as usize;
+					if x >= SCREEN_WIDTH
+					{
+						break ;
+					}
+					let pixel_index = x + SCREEN_WIDTH * y;
+					// set flip to true if pixel was already on
+					flip |= self.screen[pixel_index];
+					// flip pixel
+					self.screen[pixel_index] ^= true;
+				}
+			}
+		}
+		if flip
+		{
+			self.v_reg[0xf as usize] = 1;
+		}
+	}
+
+	pub fn get_screen(&self) -> &[bool]
+	{
+		&self.screen
+	}
+
+	pub fn load(&mut self, data: &[u8])
+	{
+		let start = START_ADDR as usize;
+		let end = START_ADDR as usize + data.len();
+		self.ram[start..end].copy_from_slice(data);
 	}
 }
